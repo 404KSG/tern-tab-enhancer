@@ -1,7 +1,5 @@
 # Tern Tab Enhancer
 
-[![Check](https://github.com/404KSG/tern-tab-enhancer/actions/workflows/check.yml/badge.svg)](https://github.com/404KSG/tern-tab-enhancer/actions/workflows/check.yml)
-
 给 Tern 原生标签增加三项增强：Tty7 风格的 Agent 状态与未读 pane 数，Dia 风格的整行手动配色，以及清理前方图标右下角的状态圆点。
 
 ![原生窗口验收预览](docs/reports/tab-preview.png)
@@ -80,7 +78,7 @@ npm ci --ignore-scripts
 npm run check
 ```
 
-GitHub CI 在 Linux / Node 22 和 24 上运行 Luau、Pi 桥、安装回滚和打包测试；它不冒充原生 UI 验收。
+[CI 模板](ci/check.yml) 配置 Linux / Node 22 和 24 上的 Luau、Pi 桥、安装回滚和打包测试。当前发布所用令牌缺少 `workflow` 权限，因此模板**尚未启用为 GitHub Actions**；启用步骤见 [CI 说明](ci/README.md)。便携测试不冒充原生 UI 验收。
 
 原生验收需要 macOS 的 Tern、Python 3 和 Pillow：
 
