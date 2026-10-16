@@ -12,10 +12,11 @@ import shlex
 import subprocess
 import time
 from PIL import Image
+from package_plugin import package_files, stage_package
 
 PROJECT = Path(__file__).resolve().parents[1]
 TERN = '/Applications/Tern.app/Contents/MacOS/tern'
-RUNTIME = ['plugin.toml','host.luau','window.luau','runtime.luau','model.luau','presentation.luau','LICENSE','pi/bridge.ts']
+RUNTIME = package_files(PROJECT, runtime_only=True)
 parser = argparse.ArgumentParser()
 parser.add_argument('--out', type=Path)
 parser.add_argument('--pi-dialog-rounds', type=int, default=1)
@@ -94,7 +95,8 @@ def plugin_state():
 
 
 def records():
-    return plugin_state().get('pane-state',{})
+    state=plugin_state()
+    return {key.removeprefix('state:'):value for key,value in state.items() if key.startswith('state:')}
 
 
 def unread():
@@ -120,7 +122,7 @@ def shot(name):
     return ctl('shot',name)
 
 
-def pixels(name, state, numeric=False):
+def pixels(name, state, numeric=False, expected_digit=None):
     result=shot(name)
     image=Image.open(result['png']).convert('RGB')
     x,y,w,h=row()['rect']
@@ -139,9 +141,21 @@ def pixels(name, state, numeric=False):
     whites=sum(min(crop.getpixel((px,py)))>205 for py in range(crop.height) for px in range(crop.width)
                if (px+.5-center_x)**2+(py+.5-center_y)**2<25)
     if numeric:
+        assert expected_digit is not None,'numeric cases require an independent expected digit'
         assert whites>=3, (name,'numeric pill has no visible glyph',whites)
+        oracle=root/'digit-oracle.css'
+        oracle.write_text('#sidebar .tn-dk-c.d0::after,#tabbar .tn-dk-c.d0::after{content:"'+str(expected_digit)+'" !important;}')
+        try:
+            ctl('css','tte-test-oracle',oracle)
+            expected_image=Image.open(shot(name+'-oracle')['png']).convert('RGB').crop(box)
+            def glyph(image):
+                return tuple(min(image.getpixel((px,py)))>205 for py in range(image.height) for px in range(image.width)
+                             if (px+.5-center_x)**2+(py+.5-center_y)**2<40)
+            assert glyph(crop)==glyph(expected_image),(name,'wrong rendered digit',expected_digit)
+        finally:
+            ctl('css','tte-test-oracle')
     crop.resize((180,180)).save(root/f'{name}-badge.png')
-    return {'png':result['png'],'colored_pixels':hits,'white_pixels':whites}
+    return {'png':result['png'],'colored_pixels':hits,'white_pixels':whites,'expected_digit':expected_digit,'digit_matches_oracle':numeric}
 
 
 def title_box():
@@ -173,9 +187,7 @@ def launch(role, argv, ready):
 
 def stage():
     source=root/'package';source.mkdir(exist_ok=True)
-    for name in RUNTIME:
-        (source/name).parent.mkdir(parents=True,exist_ok=True)
-        shutil.copy2(PROJECT/name,source/name)
+    stage_package(source, runtime_only=True)
     command('plugin','install',source,'--json')
     command('plugin','install',PROJECT/'tests/fixtures/observer','--json')
     (config/'omp').mkdir(exist_ok=True)
@@ -188,7 +200,7 @@ def stage():
     until(lambda:ctl('state').get('gate',{}).get('phase')=='off',timeout=20,label='cached account gate')
     ctl('tab','new')
     until(lambda:len(ctl('state').get('panes',[]))>0,timeout=20,label='test pane registration')
-    until(lambda:any('tern-tab-enhancer' in s['name'] and s['rules']>0 for s in ctl('css')['sheets']),
+    until(lambda:any(s['name']=='plugin:local:tern-tab-enhancer:tabs' and s['rules']>0 for s in ctl('css')['sheets']),
           timeout=15,label='window plugin bootstrap')
     ctl('ready')
 
@@ -240,7 +252,7 @@ try:
     def four_done():
         for pane in agents:send(pane,'done')
         wait_status('done',4)
-        result=pixels('four-unread','done',True)
+        result=pixels('four-unread','done',True,4)
         assert title_box()==before_box,'badge changed title width'
         result['unread']=4
         return result
@@ -248,7 +260,7 @@ try:
 
     def one_read():
         focus(agents[0]);until(lambda:unread()==3)
-        time.sleep(.2);return {**pixels('three-unread','done',True),'unread':3}
+        time.sleep(.2);return {**pixels('three-unread','done',True,3),'unread':3}
     case('read-one-keeps-three-unread',one_read)
 
     def hover():
@@ -284,17 +296,17 @@ try:
         count=unread();command('plugin','reload','--json');time.sleep(.6)
         assert unread()==count,(count,unread())
         assert any(t.get('color')=='red' for t in snapshot()['tabs'])
-        return {**pixels('reload-unread','done',True),'unread':count}
+        return {**pixels('reload-unread','done',True,3),'unread':count}
     case('read-state-and-color-survive-reload',reload)
 
     def horizontal():
         ctl('tabs','horizontal');time.sleep(.25)
-        return pixels('horizontal-counter','done',True)
+        return pixels('horizontal-counter','done',True,3)
     case('horizontal-counter',horizontal)
 
     def light():
         snapshot({'op':'settings','values':{'theme':'Light'}});time.sleep(.3)
-        return pixels('light-counter','done',True)
+        return pixels('light-counter','done',True,3)
     case('light-theme',light)
 
     def pause_resume():
@@ -303,7 +315,7 @@ try:
         assert all(s['rules']==0 for s in sheets)
         assert any(t.get('color')=='red' for t in snapshot()['tabs'])
         ctl('plugins','run','plugin.tern-tab-enhancer.resume');time.sleep(.25)
-        return pixels('resumed-counter','done',True)
+        return pixels('resumed-counter','done',True,3)
     case('pause-resume',pause_resume)
 
     def all_read():
@@ -315,7 +327,7 @@ try:
     def next_turn():
         focus(home);send(first,'working');wait_status('working')
         send(first,'done');wait_status('done',1)
-        return pixels('next-turn-one-unread','done',True)
+        return pixels('next-turn-one-unread','done',True,1)
     case('new-result-rearms-unread',next_turn)
 
     def corner_removed():
@@ -354,7 +366,7 @@ try:
         result=pixels('real-pi-shell-working','working')
         until(lambda:records().get(str(shell),{}).get('status')=='done',timeout=12)
         until(lambda:unread()==1)
-        result['completed']=pixels('real-pi-shell-done','done',True)
+        result['completed']=pixels('real-pi-shell-done','done',True,1)
         result['kind']=next(p['kind'] for p in snapshot()['panes'] if p['pane']==shell)
         return result
     case('real-pi-in-ordinary-shell',real_pi_work)
@@ -371,7 +383,92 @@ try:
         return result
     for round_index in range(args.pi_dialog_rounds):
         case('real-pi-ui-prompt-restores-read-state-'+str(round_index+1),real_pi_wait)
-    summary['versions']['offline_pi_turns']=1
+    def bridge_gap():
+        focus(shell);until(lambda:unread()==0);focus(home)
+        path=config/'plugin-data/tern-tab-enhancer/bridge'/f'{shell}.json'
+        backup=root/'bridge-gap.json'
+        path.replace(backup)
+        until(lambda:str(shell) not in plugin_state().get('bridge-states',{}),label='bridge gap observed')
+        assert records()[str(shell)]['read'] is True,'gap erased read record'
+        if not path.exists():backup.replace(path)
+        else:backup.unlink()
+        until(lambda:str(shell) in plugin_state().get('bridge-states',{}),label='bridge recovered')
+        time.sleep(.6);assert unread()==0,'same completed generation became unread'
+        return pixels('bridge-gap-keeps-read','done')
+    case('bridge-gap-preserves-read',bridge_gap)
+
+    def quick_focus():
+        focus(shell);send(shell,'Run another offline status test.')
+        until(lambda:records().get(str(shell),{}).get('status')=='working')
+        path=config/'plugin-data/tern-tab-enhancer/bridge'/f'{shell}.json'
+        deadline=time.monotonic()+10
+        while time.monotonic()<deadline:
+            if path.exists() and json.loads(path.read_text()).get('state')=='done':break
+            time.sleep(.005)
+        else:raise TimeoutError('Pi completion bridge')
+        before_focus=records().get(str(shell),{}).get('status')
+        focus(home)
+        until(lambda:records().get(str(shell),{}).get('status')=='done')
+        assert records()[str(shell)]['read'] is True,'outgoing pane completion was not acknowledged'
+        assert unread()==0
+        return {'cached_state_before_focus':before_focus,**pixels('quick-focus-keeps-read','done')}
+    case('completion-focus-boundary',quick_focus)
+
+    def native_cancel():
+        existing={p['pane'] for p in snapshot()['panes']}
+        snapshot({'op':'new','command':fixture})
+        extra=next(p['pane'] for p in snapshot()['panes'] if p['pane'] not in existing)
+        until(lambda:any(a['pane']==extra for a in snapshot()['agents']))
+        snapshot({'op':'move','pane':extra,'tab':target_tab});focus(home)
+        send(extra,'blocked');until(lambda:records().get(str(extra),{}).get('status')=='waiting')
+        result=pixels('native-idle-dialog','waiting')
+        send(extra,'idle');until(lambda:records().get(str(extra),{}).get('status')=='idle')
+        assert unread()==0,'native cancellation invented an unread result'
+        assert records()[str(extra)]['done'] is False
+        snapshot({'op':'close','pane':extra})
+        return result
+    case('native-idle-dialog-cancel-is-not-done',native_cancel)
+
+    def two_windows():
+        global control
+        primary=control;peer=root/'peer.sock'
+        launch('peer-window',['--control',peer,'--out',root/'peer-shots',root],peer)
+        try:
+            control=peer
+            until(lambda:ctl('state').get('gate',{}).get('phase')=='off',timeout=20)
+            ctl('tab','new')
+            until(lambda:any(s['name']=='plugin:local:tern-tab-enhancer:tabs' for s in ctl('css')['sheets']),timeout=15)
+            ctl('tabs','vertical');peer_home=snapshot()['focused']
+            snapshot({'op':'new','command':fixture})
+            until(lambda:len(snapshot()['agents'])==1)
+            peer_first=snapshot()['agents'][0]['pane']
+            peer_tab=next(p['tab'] for p in snapshot()['panes'] if p['pane']==peer_first)
+            snapshot({'op':'color','tab':peer_tab,'color':'red'})
+            snapshot({'op':'split','pane':peer_first,'command':fixture})
+            until(lambda:len(snapshot()['agents'])==2)
+            peer_agents=[a['pane'] for a in snapshot()['agents']]
+            focus(peer_home)
+            for pane in peer_agents:send(pane,'working')
+            for pane in peer_agents:send(pane,'done')
+            until(lambda:all(records().get(str(p),{}).get('done') for p in peer_agents))
+            pixels('peer-two-unread','done',True,2)
+            focus(peer_first)
+            until(lambda:records().get(str(peer_first),{}).get('read') is True)
+            control=primary;focus(home)
+            for pane in agents:send(pane,'working')
+            until(lambda:all(records().get(str(p),{}).get('status')=='working' for p in agents))
+            for pane in agents:send(pane,'done')
+            until(lambda:all(records().get(str(p),{}).get('done') for p in agents))
+            time.sleep(.6);pixels('primary-four-unread','done',True,4)
+            command('plugin','reload','--json');time.sleep(.7)
+            control=peer;ctl('stats');pixels('peer-read-survives-other-window','done',True,1)
+            control=primary;ctl('stats');result=pixels('primary-unread-survives-peer','done',True,4)
+            control=peer;ctl('quit')
+            return result
+        finally:control=primary
+    case('two-windows-do-not-overwrite-pane-read-state',two_windows)
+
+    summary['versions']['offline_pi_turns']=2
     summary['versions']['pi']=subprocess.run([shutil.which('pi'),'--version'],capture_output=True,text=True,timeout=10).stdout.strip()
 
     def uninstall():

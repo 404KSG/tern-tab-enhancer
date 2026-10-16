@@ -1,0 +1,5 @@
+{
+  "runtime": ["plugin.toml", "host.luau", "window.luau", "runtime.luau", "model.luau", "presentation.luau", "pi/bridge.ts"],
+  "documentation": ["LICENSE", "README.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md", "docs/README.md", "docs/design/tab-enhancement.md", "docs/reports/verification.md", "docs/reports/reliability-0.2.0.md", "docs/reports/tab-preview.png"],
+  "support": ["package-files.json", "scripts/install.py", "scripts/package_plugin.py"]
+}

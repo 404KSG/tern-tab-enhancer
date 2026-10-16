@@ -55,11 +55,20 @@ local function publish()
     end
     read_bridges(ids)
 end
+local failures = 0
+local function safe_publish()
+    local ok, err = pcall(publish)
+    if ok then failures = 0
+    else
+        failures += 1
+        if failures == 1 then tern.log.warn("Tab status host read failed; retrying", string.sub(tostring(err),1,240)) end
+    end
+end
 local function poll()
-    publish()
-    tern.timer(500, poll)
+    safe_publish()
+    tern.timer(math.min(8000,500 * 2 ^ math.min(failures,4)), poll)
 end
 for _, event in ipairs({"command_started", "command_finished", "cwd", "title", "pane_exited"}) do
-    tern.on(event, publish)
+    tern.on(event, safe_publish)
 end
 poll()

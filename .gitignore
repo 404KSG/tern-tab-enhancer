@@ -1,5 +1,6 @@
 node_modules/
 artifacts/
+dist/
 __pycache__/
 .venv/
 .env

@@ -10,7 +10,9 @@ M.key = key
 function M.new(saved)
     local records = {}
     for id, record in pairs(saved or {}) do
-        records[id] = {done = record.done == true, read = record.read == true, status = record.status or "idle", generation = record.generation}
+        records[id] = {done = record.done == true, read = record.read == true, status = record.status or "idle",
+            generation = record.generation or "native:0", cycle = record.cycle or 0,
+            native_active = record.native_active == true, pending = record.pending == true, viewed = record.viewed == true}
     end
     return {records = records}
 end
@@ -22,17 +24,25 @@ function M.finished(self, pane, result, focused)
         return
     end
     local previous = self.records[id]
-    self.records[id] = {done = true, read = (previous and previous.generation and previous.done and previous.read) or pane == focused, status = "done", generation = previous and previous.generation}
+    self.records[id] = {done = true, read = (previous and ((previous.done and previous.read) or previous.viewed)) == true or pane == focused,
+        status = "done", generation = previous and previous.generation or "native:0", cycle = previous and previous.cycle or 0,
+        native_active = false, pending = false, viewed = false}
 end
 
 function M.focus(self, pane)
     local record = self.records[key(pane)]
-    if record and record.done then record.read = true end
+    if record then
+        if record.done then record.read = true end
+        if record.pending then record.viewed = true end
+    end
 end
 
 function M.update(self, panes, agents, aliases)
     local pane_by_id, live, tabs = {}, {}, {}
-    for _, pane in ipairs(panes) do pane_by_id[key(pane.pane)] = pane end
+    for _, pane in ipairs(panes) do
+        local id = key(pane.pane)
+        pane_by_id[id], live[id] = pane, true
+    end
     for _, agent in ipairs(agents) do
         local id = key(agent.pane)
         local pane = pane_by_id[id]
@@ -40,15 +50,14 @@ function M.update(self, panes, agents, aliases)
             live[id] = true
             local record = self.records[id]
             if not record then
-                record = {done = false, read = false, status = "idle"}
-                -- Import native attention on first load without importing transcript text.
-                if agent.state == "idle" and pane.alert == true then record.done = true end
+                record = {done = false, read = false, status = "idle", generation = "native:0", cycle = 0}
                 self.records[id] = record
             end
             local previous = record.status
             if agent.generation and record.generation ~= agent.generation then
                 record.generation = agent.generation
                 record.done, record.read, record.status = false, false, "idle"
+                record.viewed, record.pending, record.native_active = false, false, false
             end
             if agent.phase == "done" then
                 if not record.done then record.read = pane.focused == true end
@@ -60,16 +69,22 @@ function M.update(self, panes, agents, aliases)
                 -- same generation; closing it must not create another unread.
                 record.status = "waiting"
             elseif agent.state == "working" then
+                if not agent.generation and not record.native_active then
+                    record.cycle = (record.cycle or 0) + 1
+                    record.generation = "native:" .. tostring(record.cycle)
+                end
+                record.native_active = not agent.generation
+                record.pending, record.viewed = false, false
                 record.status, record.done, record.read = "working", false, false
             elseif agent.state == "waiting_input" then
-                record.status, record.done, record.read = "waiting", false, false
+                record.status = "waiting"
             else
-                if previous == "working" or previous == "waiting" or agent.state == "exited" then
-                    if not record.done then record.read = pane.focused == true end
-                    record.done = true
-                end
+                -- Idle is not proof of completion: an idle dialog may be cancelled.
+                -- Remember viewing a settled run so a delayed completion event is read.
+                if record.native_active then record.pending = true; record.native_active = false end
                 record.status = if record.done then "done" else "idle"
             end
+            if record.pending and pane.focused == true then record.viewed = true end
             if record.done and pane.focused == true then record.read = true end
             local tab_id = key(pane.tab)
             local tab = tabs[tab_id]
@@ -105,10 +120,24 @@ function M.update(self, panes, agents, aliases)
     return output
 end
 
+function M.merge(self, saved)
+    local incoming = M.new(saved).records
+    for id, peer in pairs(incoming) do
+        local own = self.records[id]
+        if not own or (string.match(peer.generation,"^native:") and string.match(own.generation or "","^native:") and peer.cycle > (own.cycle or 0)) then
+            self.records[id] = peer
+        elseif own.generation == peer.generation then
+            own.read = own.read or peer.read
+            own.viewed = own.viewed or peer.viewed
+            if peer.done then own.done = true end
+        end
+    end
+end
+
 function M.fingerprint(self)
     local rows = {}
     for id, record in pairs(self.records) do
-        table.insert(rows, id .. ":" .. tostring(record.done) .. ":" .. tostring(record.read) .. ":" .. record.status .. ":" .. tostring(record.generation))
+        table.insert(rows, id .. ":" .. tostring(record.done) .. ":" .. tostring(record.read) .. ":" .. record.status .. ":" .. tostring(record.generation) .. ":" .. tostring(record.pending) .. ":" .. tostring(record.viewed) .. ":" .. tostring(record.native_active))
     end
     table.sort(rows)
     return table.concat(rows, "|")

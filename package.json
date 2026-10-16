@@ -1,12 +1,14 @@
 {
   "name": "tern-tab-enhancer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "license": "MIT",
   "scripts": {
     "check": "node scripts/check.mjs",
-    "test:native": "python3 scripts/verify_native.py"
+    "test:native": "python3 scripts/verify_native.py",
+    "test:installer": "python3 -m unittest discover -s tests -p 'test_*.py' -v",
+    "package": "python3 scripts/package_plugin.py --out dist/tern-tab-enhancer-0.2.0.tar.gz"
   },
   "devDependencies": {
     "luau-web": "1.5.1"

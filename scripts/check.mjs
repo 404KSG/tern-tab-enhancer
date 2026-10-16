@@ -6,8 +6,9 @@ import {LuauState} from 'luau-web';
 
 const root = new URL('../', import.meta.url);
 const read = name => readFile(new URL(name, root), 'utf8');
+const packageFiles = JSON.parse(await read('package-files.json'));
 const sources = Object.fromEntries(await Promise.all(
-  ['model.luau', 'presentation.luau', 'host.luau', 'window.luau', 'runtime.luau', 'tests/behavior.luau']
+  [...packageFiles.runtime.filter(name => name.endsWith('.luau')), 'tests/behavior.luau']
     .map(async name => [name, await read(name)]),
 ));
 const manifest = await read('plugin.toml');
@@ -16,8 +17,11 @@ const lock = JSON.parse(await read('package-lock.json'));
 assert.match(manifest, new RegExp(`id = "${pkg.name}"`));
 assert.match(manifest, new RegExp(`version = "${pkg.version.replaceAll('.', '\\.')}"`));
 assert.equal(lock.packages[''].version, pkg.version);
-for (const name of ['host.luau', 'window.luau', 'runtime.luau', 'model.luau', 'presentation.luau']) {
-  await stat(new URL(name, root));
+const shipped = Object.values(packageFiles).flat();
+assert.equal(new Set(shipped).size, shipped.length, 'duplicate package paths');
+for (const name of shipped) {
+  assert.ok(!name.startsWith('/') && !name.split('/').includes('..'), 'unsafe package path');
+  assert.ok((await stat(new URL(name, root))).isFile(), `missing packaged file: ${name}`);
 }
 
 const vm = await LuauState.createAsync();
@@ -55,4 +59,7 @@ console.log(`PASS: native preferences, manual colors and titles remain outside t
 const bridgeTests = spawnSync(process.execPath, ['--test', '--test-reporter=tap', fileURLToPath(new URL('tests/bridge.test.mjs', root))], {encoding:'utf8'});
 assert.equal(bridgeTests.status, 0, bridgeTests.stdout + bridgeTests.stderr);
 console.log(`PASS: ${bridgeTests.stdout.match(/# tests (\d+)/)?.[1] ?? 'all'} Pi bridge lifecycle and privacy cases.`);
+const installerTests = spawnSync('python3', ['-m', 'unittest', 'discover', '-s', fileURLToPath(new URL('tests/', root)), '-p', 'test_*.py', '-v'], {encoding:'utf8'});
+assert.equal(installerTests.status, 0, installerTests.stdout + installerTests.stderr);
+console.log(`PASS: Python installer/package tests.\n${installerTests.stderr.trim()}`);
 console.log(`Project: ${fileURLToPath(root)}`);

@@ -75,8 +75,30 @@ test("next turn clears old read marker", function()
     update(m,{pane(1)},{agent(1,"working")});Model.finished(m,1,"done",nil)
     eq(update(m,{pane(1)},{agent(1,"idle")}).count,1)
 end)
-test("native attention imported on plugin first load", function()
-    eq(update(Model.new(),{pane(1,10,false,true)},{agent(1,"idle")}).count,1)
+test("uncategorized native attention is not a completion", function()
+    eq(update(Model.new(),{pane(1,10,false,true)},{agent(1,"idle")}).state,"idle")
+end)
+test("native idle dialog cancellation does not invent a result",function()
+    local m=Model.new();update(m,{pane(1)},{agent(1,"idle")})
+    update(m,{pane(1)},{agent(1,"waiting_input")})
+    local tab=update(m,{pane(1)},{agent(1,"idle")})
+    eq(tab.state,"idle");eq(tab.count,0)
+end)
+test("native waiting restores an already-read result",function()
+    local m=Model.new();Model.finished(m,1,"done",1)
+    update(m,{pane(1)},{agent(1,"waiting_input")})
+    local tab=update(m,{pane(1)},{agent(1,"idle")})
+    eq(tab.state,"done");eq(tab.count,0)
+end)
+test("native completion is explicit and repeated completion is idempotent",function()
+    local m=Model.new();update(m,{pane(1)},{agent(1,"working")})
+    eq(update(m,{pane(1)},{agent(1,"idle")}).state,"idle")
+    Model.focus(m,1);Model.finished(m,1,"done",2)
+    eq(update(m,{pane(1)},{agent(1,"idle")}).count,0)
+    Model.finished(m,1,"done",2)
+    eq(update(m,{pane(1)},{agent(1,"idle")}).count,0)
+    update(m,{pane(1)},{agent(1,"working")});Model.finished(m,1,"done",2)
+    eq(update(m,{pane(1)},{agent(1,"idle")}).count,1)
 end)
 test("viewed completion survives reload despite native alert", function()
     local m=Model.new();Model.finished(m,1,"done",1)
@@ -92,6 +114,14 @@ test("move recomputes tab and preserves unread identity", function()
     eq(update(m,{pane(1,20)},{agent(1,"idle")}).id,20)
     eq(update(m,{pane(1,30)},{agent(1,"idle")}).count,1)
 end)
+test("temporary missing bridge keeps the same generation read",function()
+    local m=Model.new();local ps={pane(1)}
+    local done={{pane=1,state="idle",phase="done",generation="abc:1"}}
+    update(m,ps,done);Model.focus(m,1);eq(update(m,ps,done).count,0)
+    eq(#Model.update(m,ps,{}),0)
+    eq(update(m,ps,done).count,0)
+end)
+
 test("ordinary shell is never guessed to be a working agent", function()
     local m=Model.new()
     eq(#Model.update(m,{{pane=1,tab=10,kind="terminal",busy=true}},{}),0)
@@ -132,12 +162,15 @@ test("working-title shimmer keeps the manually selected tab hue", function()
 end)
 
 -- Exercise the actual window module against a native-shaped API mock.
-local function runtime(start_window)
+local function runtime(start_window, shared)
     local time, timers, handlers, commands, css_calls, writes, reads, requires = 0, {}, {}, {}, {}, 0, 0, 0
-    local storage = {}
+    local storage = shared or {}
     local ps={pane(1)};local ags={agent(1,"working")}
     local cx={session={},agents={}}
-    function cx.session:panes() return ps end
+    function cx.session:panes()
+        local snapshot={};for _,p in ipairs(ps) do table.insert(snapshot,table.clone(p)) end
+        return snapshot
+    end
     function cx.session:pane(id) for _,p in ipairs(ps) do if Model.key(p.pane)==id then return p end end end
     function cx.session:focused() for _,p in ipairs(ps) do if p.focused then return p.pane end end return nil end
     function cx.agents:list() return ags end
@@ -145,12 +178,17 @@ local function runtime(start_window)
         if type(value)~="table" then return value end
         local result={};for k,v in pairs(value) do result[k]=clone(v) end;return result
     end
-    local api={kv={},json={null={}},on=function(name,fn) handlers[name]=fn end,
+    local direct_reports={}
+    local api={plugin={data="/plugin"},fs={},kv={},json={null={}},on=function(name,fn) handlers[name]=fn end,
         command=function(def) commands[def.id]=def.run end,
         now=function() return time end,
         css=function(name,source) table.insert(css_calls,source) end,
         on_require=function() requires+=1 end,
+        log={warn=function() end},
     }
+    function api.fs.exists(path) return direct_reports[path]~=nil end
+    function api.fs.read(path,limit) eq(limit,4096);return path end
+    function api.json.decode(path) return clone(direct_reports[path]) end
     function api.kv.get(k) reads+=1;return clone(storage[k]) end
     function api.kv.set(k,v) storage[k]=clone(v);writes+=1 end
     function api.timer(ms,fn)
@@ -160,7 +198,7 @@ local function runtime(start_window)
     end
     load_window_plugin(api)
     if start_window ~= false then handlers.window_start(cx) end
-    local result={ctx=cx,commands=commands,handlers=handlers,css=css_calls}
+    local result={ctx=cx,commands=commands,handlers=handlers,css=css_calls,storage=storage,direct=direct_reports,api=api}
     function result.tick()
         for _,timer in ipairs(timers) do
             if not timer.cancelled and not timer.fired then
@@ -177,7 +215,7 @@ local function runtime(start_window)
     function result.requires() return requires end
     function result.ready()
         for _=1,8 do
-            if #css_calls>0 then return end
+            for _,css in ipairs(css_calls) do if string.find(css,"@keyframes tteWorking",1,true) then return end end
             result.tick()
         end
         error("Bootstrap did not finish")
@@ -202,6 +240,25 @@ test("thirty steady-state polls do not replace stylesheet", function()
     for _=1,30 do r.tick() end
     eq(#r.css,applies);eq(r.writes(),writes)
 end)
+test("a startup KV read error is retried rather than disabling bootstrap",function()
+    local r=runtime();local original=r.api.kv.get;local failed=false
+    r.api.kv.get=function(key)
+        if not failed then failed=true;error("temporary KV read") end
+        return original(key)
+    end
+    r.ready();assert(string.find(r.css[#r.css-1] or "","#3B82F6",1,true) or string.find(r.css[#r.css],"#3B82F6",1,true))
+end)
+
+test("one transient native read error recovers without another user event",function()
+    local r=runtime();r.ready();local original=r.ctx.agents.list
+    r.ctx.agents.list=function() error("transient test error") end
+    r.tick();eq(r.pending(),1)
+    r.ctx.agents.list=original
+    r.set({pane(1)},{agent(1,"waiting_input")});r.tick()
+    assert(string.find(r.css[#r.css-1] or "", "#F59E0B",1,true) or string.find(r.css[#r.css], "#F59E0B",1,true))
+    eq(r.pending(),1)
+end)
+
 test("title storms coalesce into one scheduled refresh", function()
     local r=runtime();r.ready()
     for _=1,500 do r.handlers.title({pane=1,title="unchanged"},r.ctx) end
@@ -220,6 +277,69 @@ test("completion and focus events refresh native count", function()
     r.handlers.focus({pane=1},r.ctx);r.tick()
     assert(not string.find(r.css[#r.css],'content:"1"',1,true))
 end)
+for _, flaky in ipairs({false,true}) do
+test("focus checkpoint sees completion before host poll; transient read="..tostring(flaky),function()
+    local r=runtime()
+    r.set({pane(1,10,true),{pane=2,tab=20,kind="terminal",focused=false}}, {})
+    r.storage["bridge-states"]={["1"]={state="working",generation="abc:1"}}
+    r.ready()
+    r.direct["/plugin/bridge/1.json"]={schema=1,pane="1",state="done",generation="abc:1",sequence=3}
+    if flaky then
+        local read=r.api.fs.read;local failed=false
+        r.api.fs.read=function(...)
+            if not failed then failed=true;error("transient boundary IO") end
+            return read(...)
+        end
+    end
+    r.set({pane(1),{pane=2,tab=20,kind="terminal",focused=true}}, {})
+    r.handlers.focus({pane=2},r.ctx)
+    r.storage["bridge-states"]={["1"]={state="done",generation="abc:1"}}
+    r.tick()
+    assert(not string.find(r.css[#r.css],'content:"1"',1,true),"a viewed result became unread")
+    assert(string.find(r.css[#r.css],"#22C55E",1,true))
+end)
+end
+
+test("persistent focus read failure is visible and never guesses an acknowledgement",function()
+    local r=runtime();local notices={}
+    function r.ctx:toast(level,title) table.insert(notices,title) end
+    r.set({pane(1,10,true),{pane=2,tab=20,kind="terminal",focused=false}}, {})
+    r.storage["bridge-states"]={["1"]={state="working",generation="abc:1"}};r.ready()
+    r.direct["/plugin/bridge/1.json"]={schema=1,pane="1",state="done",generation="abc:1",sequence=3}
+    local original=r.api.fs.read;r.api.fs.read=function() error("persistent read failure") end
+    r.set({pane(1),{pane=2,tab=20,kind="terminal",focused=true}}, {})
+    r.handlers.focus({pane=2},r.ctx);eq(#notices,1);eq(r.pending(),1)
+    r.api.fs.read=original;r.storage["bridge-states"]={["1"]={state="done",generation="abc:1"}}
+    r.tick()
+    assert(string.find(r.css[#r.css-1] or "",'content:"1"',1,true) or string.find(r.css[#r.css],'content:"1"',1,true))
+end)
+
+test("two window runtimes share read acknowledgement without overwriting another pane",function()
+    local shared={["bridge-states"]={
+        ["1"]={state="done",generation="abc:1"},["2"]={state="done",generation="def:1"}}}
+    local a,b=runtime(true,shared),runtime(true,shared)
+    a.set({pane(1),pane(2)},{});b.set({pane(1),pane(2)},{});a.ready();b.ready()
+    assert(string.find(b.css[#b.css],'content:"2"',1,true))
+    a.set({pane(1,10,true),pane(2)},{});a.handlers.focus({pane=1},a.ctx)
+    b.tick();assert(string.find(b.css[#b.css],'content:"1"',1,true))
+    b.set({pane(1),pane(2,10,true)},{});b.handlers.focus({pane=2},b.ctx)
+    a.tick();assert(not string.find(a.css[#a.css],'content:"1"',1,true))
+end)
+
+test("read receipts are bounded and removed when a pane closes",function()
+    local r=runtime();r.set({pane(1,10,true)},{})
+    r.storage["bridge-states"]={["1"]={state="done",generation="abc:1"}};r.ready()
+    for cycle=2,12 do
+        r.storage["bridge-states"]={["1"]={state="done",generation="abc:"..cycle}}
+        r.tick()
+    end
+    local count=0;for key in pairs(r.storage) do if string.match(key,"^read:1:") then count+=1 end end
+    eq(count,8)
+    r.handlers.pane_closed({pane=1},r.ctx)
+    eq(r.storage["state:1"],nil);eq(r.storage["read-generations:1"],nil)
+    for key in pairs(r.storage) do assert(not string.match(key,"^read:1:")) end
+end)
+
 test("ordinary terminal Pi bridge supplies precise waiting", function()
     local ps={{pane=1,tab=10,kind="terminal",busy=true}}
     local sources=Model.with_bridges(ps,{}, {["1"]="394471271301128"}, {["394471271301128"]={state="waiting",generation="abc:1"}})
@@ -254,7 +374,7 @@ end)
 local function host_runtime()
     local clock, timers, storage, writes = 0, {}, {}, 0
     local report={schema=1,pane="1",state="working",generation="abc:1",sequence=1}
-    local api={plugin={data="/plugin"},kv={},fs={},json={},pane={},on=function() end,now=function() return clock end}
+    local api={plugin={data="/plugin"},kv={},fs={},json={},pane={},log={warn=function() end},on=function() end,now=function() return clock end}
     function api.pane.list() return {{pane=1}} end
     function api.fs.exists() return report~=nil end
     function api.fs.read(_,limit) eq(limit,4096);return "report" end
@@ -262,7 +382,7 @@ local function host_runtime()
     function api.kv.set(k,v) storage[k]=v;writes+=1 end
     function api.timer(ms,fn) table.insert(timers,{ms=ms,fn=fn});return {cancel=function() end} end
     load_host_plugin(api)
-    local result={storage=storage}
+    local result={storage=storage,api=api}
     function result.tick()
         local timer=table.remove(timers,1);clock+=timer.ms;timer.fn()
     end
@@ -271,6 +391,14 @@ local function host_runtime()
     function result.writes() return writes end
     return result
 end
+
+test("host metadata error does not stop its heartbeat",function()
+    local h=host_runtime();local original=h.api.pane.list
+    h.api.pane.list=function() error("transient host metadata") end
+    h.tick();h.api.pane.list=original
+    h.value().state="waiting";h.value().sequence+=1;h.tick()
+    eq(h.storage["bridge-states"]["1"].state,"waiting")
+end)
 
 test("host bridge heartbeat does not rewrite unchanged status KV",function()
     local h=host_runtime();eq(h.storage["bridge-states"]["1"].state,"working")

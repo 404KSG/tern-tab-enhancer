@@ -1,7 +1,7 @@
 schema = 1
 id = "tern-tab-enhancer"
 name = "Tern Tab Enhancer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Tty7 状态与未读数、Dia 风格标签配色，移除图标角标。"
 host = "host.luau"
 window = "window.luau"
