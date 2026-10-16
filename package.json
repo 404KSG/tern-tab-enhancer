@@ -1,0 +1,14 @@
+{
+  "name": "tern-tab-enhancer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test:native": "python3 scripts/verify_native.py"
+  },
+  "devDependencies": {
+    "luau-web": "1.5.1"
+  }
+}
